@@ -1,0 +1,17 @@
+# ESPHome build artifacts
+/.esphome/
+
+# Secrets (WiFi credentials, API keys)
+/secrets.yaml
+
+# Claude Code local settings
+/.claude/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

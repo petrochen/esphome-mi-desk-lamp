@@ -1,0 +1,315 @@
+esphome:
+  name: mi-desk-lamp
+  friendly_name: "Mi Desk Lamp"
+
+esp8266:
+  board: esp01_1m
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Mi-Desk-Lamp-AP"
+    password: !secret ap_password
+
+captive_portal:
+
+api:
+  reboot_timeout: 0s
+
+logger:
+  level: WARN
+  baud_rate: 0
+
+ota:
+  platform: esphome
+
+web_server:
+  port: 80
+  local: true
+
+# Time sync via NTP
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Lisbon
+    servers:
+      - pool.ntp.org
+    on_time:
+      # Every hour: 2 blinks
+      - seconds: 0
+        minutes: 0
+        then:
+          - if:
+              condition:
+                light.is_on: desk_lamp
+              then:
+                - script.execute: blink_twice
+      # Every half hour: 1 blink
+      - seconds: 0
+        minutes: 30
+        then:
+          - if:
+              condition:
+                light.is_on: desk_lamp
+              then:
+                - script.execute: blink_once
+
+# Sun position for Lisbon
+sun:
+  id: sun_sun
+  latitude: 38.7223°
+  longitude: -9.1393°
+
+text_sensor:
+  - platform: sun
+    type: sunrise
+    name: "Sunrise"
+  - platform: sun
+    type: sunset
+    name: "Sunset"
+
+output:
+  - platform: esp8266_pwm
+    pin: GPIO4
+    id: output_cw
+    frequency: 1000 Hz
+  - platform: esp8266_pwm
+    pin: GPIO5
+    id: output_ww
+    frequency: 1000 Hz
+
+globals:
+  - id: circadian_override
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: brightness_step_value
+    type: float
+    restore_value: yes
+    initial_value: '0.10'
+
+light:
+  - platform: cwww
+    name: "Light"
+    id: desk_lamp
+    cold_white: output_cw
+    warm_white: output_ww
+    cold_white_color_temperature: 6500 K
+    warm_white_color_temperature: 2700 K
+    constant_brightness: true
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_OFF
+    gamma_correct: 0
+    on_turn_on:
+      - lambda: |-
+          // Skip if manually overridden
+          if (id(circadian_override)) return;
+
+          // Get current time
+          auto time = id(sntp_time).now();
+          if (!time.is_valid()) return;
+
+          // Get sunrise/sunset
+          auto sunrise = id(sun_sun).sunrise(0).value_or(esphome::ESPTime{});
+          auto sunset = id(sun_sun).sunset(0).value_or(esphome::ESPTime{});
+
+          if (!sunrise.is_valid() || !sunset.is_valid()) return;
+
+          // Current minutes since midnight
+          int now_min = time.hour * 60 + time.minute;
+          int sunrise_min = sunrise.hour * 60 + sunrise.minute;
+          int sunset_min = sunset.hour * 60 + sunset.minute;
+
+          // Calculate color temperature in Kelvin
+          float temp_k;
+
+          // Night: sunset+2h to sunrise -> 2700K
+          if (now_min < sunrise_min || now_min > sunset_min + 120) {
+            temp_k = 2700;
+          }
+          // Morning warmup: sunrise to sunrise+2h -> 2700K to 5500K
+          else if (now_min < sunrise_min + 120) {
+            float progress = (now_min - sunrise_min) / 120.0f;
+            temp_k = 2700 + progress * 2800;
+          }
+          // Day: sunrise+2h to sunset-2h -> 5500K to 6500K
+          else if (now_min < sunset_min - 120) {
+            float day_progress = (now_min - sunrise_min - 120) / (float)(sunset_min - sunrise_min - 240);
+            temp_k = 5500 + day_progress * 1000;
+          }
+          // Evening cooldown: sunset-2h to sunset -> 6500K to 3500K
+          else if (now_min < sunset_min) {
+            float progress = (now_min - (sunset_min - 120)) / 120.0f;
+            temp_k = 6500 - progress * 3000;
+          }
+          // Dusk: sunset to sunset+2h -> 3500K to 2700K
+          else {
+            float progress = (now_min - sunset_min) / 120.0f;
+            temp_k = 3500 - progress * 800;
+          }
+
+          // Apply circadian temperature
+          auto call = id(desk_lamp).make_call();
+          call.set_color_temperature(1000000.0f / temp_k);
+          call.perform();
+
+          // Update slider to show current value
+          id(color_temp_slider).publish_state(temp_k);
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    internal: true
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    internal: true
+  - platform: rotary_encoder
+    id: encoder
+    internal: true
+    pin_a:
+      number: GPIO13
+      mode: INPUT_PULLUP
+    pin_b:
+      number: GPIO12
+      mode: INPUT_PULLUP
+    resolution: 1
+    on_clockwise:
+      - lambda: |-
+          if (id(encoder_button).state) {
+            // Button pressed: increase color temperature (warmer)
+            id(circadian_override) = true;
+            auto call = id(desk_lamp).turn_on();
+            auto traits = id(desk_lamp).get_traits();
+            float min_temp = traits.get_min_mireds();
+            float max_temp = traits.get_max_mireds();
+            float cur_temp = id(desk_lamp).current_values.get_color_temperature();
+            float new_temp = min(max_temp, cur_temp + 15);
+            call.set_color_temperature(new_temp);
+            call.perform();
+          } else {
+            // Increase brightness
+            auto call = id(desk_lamp).make_call();
+            float cur = id(desk_lamp).current_values.get_brightness();
+            float step = id(brightness_step_value);
+            float new_br = min(1.0f, cur + step);
+            call.set_brightness(new_br);
+            call.perform();
+          }
+    on_anticlockwise:
+      - lambda: |-
+          if (id(encoder_button).state) {
+            // Button pressed: decrease color temperature (cooler)
+            id(circadian_override) = true;
+            auto call = id(desk_lamp).turn_on();
+            auto traits = id(desk_lamp).get_traits();
+            float min_temp = traits.get_min_mireds();
+            float max_temp = traits.get_max_mireds();
+            float cur_temp = id(desk_lamp).current_values.get_color_temperature();
+            float new_temp = max(min_temp, cur_temp - 15);
+            call.set_color_temperature(new_temp);
+            call.perform();
+          } else {
+            // Decrease brightness
+            auto call = id(desk_lamp).make_call();
+            float cur = id(desk_lamp).current_values.get_brightness();
+            float step = id(brightness_step_value);
+            float new_br = max(0.01f, cur - step);
+            call.set_brightness(new_br);
+            call.perform();
+          }
+
+number:
+  - platform: template
+    name: "Color Temperature"
+    id: color_temp_slider
+    unit_of_measurement: "K"
+    min_value: 2700
+    max_value: 6500
+    step: 100
+    optimistic: true
+    restore_value: true
+    initial_value: 4000
+    set_action:
+      - lambda: |-
+          id(circadian_override) = true;
+          auto call = id(desk_lamp).turn_on();
+          call.set_color_temperature(1000000.0f / x);
+          call.perform();
+
+  - platform: template
+    name: "Brightness Step"
+    id: brightness_step
+    unit_of_measurement: "%"
+    min_value: 1
+    max_value: 20
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    set_action:
+      - lambda: 'id(brightness_step_value) = x / 100.0f;'
+
+switch:
+  - platform: template
+    name: "Circadian Mode"
+    id: circadian_mode
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: 'id(circadian_override) = false;'
+    turn_off_action:
+      - lambda: 'id(circadian_override) = true;'
+
+button:
+  - platform: template
+    name: "Test Single Blink"
+    on_press:
+      - script.execute: blink_once
+
+  - platform: template
+    name: "Test Double Blink"
+    on_press:
+      - script.execute: blink_twice
+
+script:
+  - id: blink_once
+    then:
+      - lambda: |-
+          float cur_br = id(desk_lamp).current_values.get_brightness();
+          auto call = id(desk_lamp).make_call();
+          call.set_brightness(cur_br * 0.3);
+          call.set_transition_length(100);
+          call.perform();
+      - delay: 150ms
+      - lambda: |-
+          float cur_br = id(desk_lamp).current_values.get_brightness();
+          auto call = id(desk_lamp).make_call();
+          call.set_brightness(cur_br / 0.3);
+          call.set_transition_length(100);
+          call.perform();
+
+  - id: blink_twice
+    then:
+      - script.execute: blink_once
+      - delay: 300ms
+      - script.execute: blink_once
+
+binary_sensor:
+  - platform: gpio
+    id: encoder_button
+    internal: true
+    pin:
+      number: GPIO2
+      inverted: true
+      mode: INPUT_PULLUP
+    on_click:
+      then:
+        - light.toggle: desk_lamp
+    on_double_click:
+      then:
+        # Double-click: reset to circadian mode
+        - lambda: 'id(circadian_override) = false;'
+        - switch.turn_on: circadian_mode

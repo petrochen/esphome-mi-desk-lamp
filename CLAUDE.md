@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**GitHub:** https://github.com/petrochen/esphome-mi-desk-lamp
+
 ## Project Overview
 
 ESPHome firmware for **Xiaomi Mi Desk Lamp (MJTD01YL)** — smart desk lamp with rotary encoder, button, dual-color (warm/cold white) LED control, **circadian lighting** based on sunrise/sunset, and **hourly time reminders**.
